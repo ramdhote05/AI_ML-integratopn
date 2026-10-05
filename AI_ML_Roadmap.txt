@@ -1,0 +1,475 @@
+AI/ML ROADMAP
+IoT-Based Solar Crop Dryer Monitoring System
+
+Prepared: October 2026
+Audience: Project team
+Status: Proposed plan; confirm hardware, available telemetry, and dataset before implementation.
+
+======================================================================
+1. EXECUTIVE SUMMARY
+======================================================================
+
+This roadmap adds a data-driven prediction capability to the existing
+solar crop dryer architecture:
+
+    ESP32 -> MQTT -> Node-RED -> InfluxDB -> Grafana
+                         |
+                         +-> ML inference service -> InfluxDB -> Grafana
+
+The recommended first release is an advisory model that estimates either:
+
+  A. Remaining drying time / likely completion time, or
+  B. Crop moisture content, if moisture measurements are available as
+     training labels.
+
+These are related but distinct model objectives. The team should select
+one primary objective after reviewing the sensors and labels actually
+available. Remaining-time prediction is often the easiest first target
+if complete-batch start and end times are recorded. A moisture soft
+sensor requires measured moisture values paired with sensor readings.
+
+The model can be trained and evaluated offline before any integration
+work. Once it meets agreed validation criteria, a small inference service
+can be added beside Node-RED. Grafana can display estimates alongside
+raw readings. The initial deployment must be read-only/advisory: it must
+not operate heaters, fans, or safety controls.
+
+The workspace currently contains thesis PDFs, but no firmware, Node-RED
+flows, sensor exports, or labeled dataset. The first project activity is
+therefore an implementation and data inventory, followed by data
+collection if the required examples are not yet available.
+
+======================================================================
+2. PROJECT GOALS AND NON-GOALS
+======================================================================
+
+Goals
+-----
+- Establish a reliable historical dataset from live ESP32 readings.
+- Train a reproducible baseline ML model using completed drying runs.
+- Evaluate the model on batches it has not seen during training.
+- Display useful predictions and data-quality status in Grafana.
+- Keep the model, Node-RED flow, InfluxDB measurements, and firmware
+  loosely coupled so each can be updated independently.
+- Preserve the existing system behavior when the model or network is
+  unavailable.
+
+Non-goals for the first release
+-------------------------------
+- Replacing ESP32 firmware or Node-RED as the source of truth for safety.
+- Letting an ML model directly control a heater, fan, or cutoff.
+- Starting with an LSTM/GRU or reinforcement-learning controller before
+  there is enough representative data and a validated simulator.
+- Claiming accurate moisture estimates without measured moisture labels.
+- Requiring an ESP32-CAM. This plan is sensor-only.
+
+======================================================================
+3. RECOMMENDED FIRST ML FEATURE
+======================================================================
+
+Preferred first target: remaining drying time or estimated completion.
+
+Why this is a practical starting point:
+- A completed batch provides a natural outcome: its start time and end
+  time, using a clearly defined end-of-drying rule.
+- Historical sensor time series can be converted into features such as
+  current conditions, recent trends, elapsed time, and weight-loss rate.
+- The model can be trained off-device and later called by a local service.
+- Results are directly useful in Grafana without changing the dryer
+  control loop.
+
+Alternative target: moisture soft sensor.
+
+Use this when the team can collect actual moisture measurements during
+or at the end of drying. Start with the project's mass-balance equation
+as a baseline if the hardware thesis defines one, then assess whether an
+ML model can reduce its error. Do not treat estimated moisture generated
+by that same equation as independent ground truth.
+
+Optional follow-up: anomaly detection for sensor drift, dropouts, or
+unexpected process behavior. This can be valuable, but it should not
+replace basic range checks, missing-data detection, or electrical safety
+protections.
+
+======================================================================
+4. DATA REQUIREMENTS
+======================================================================
+
+4.1 Minimum telemetry to preserve
+---------------------------------
+Record each sensor sample with:
+- UTC timestamp, preferably ISO 8601.
+- Batch/run ID that remains constant for one crop drying run.
+- Crop type and, when practical, variety and initial load mass.
+- Sensor name and value, with units documented.
+- Device ID and sensor ID, if there can be multiple devices/sensors.
+- Data-quality information: missing, stale, invalid, or out-of-range.
+
+Candidate signals, subject to confirmation against the actual hardware:
+- Chamber temperature.
+- Chamber relative humidity.
+- Ambient temperature and humidity, if measured.
+- Crop/tray weight from a load cell, if installed.
+- Fan/heater state or duty cycle, if available.
+- Solar irradiance or collector temperature, if available.
+
+Record the physical units, sensor locations, calibration procedure, and
+sampling interval. Do not assume a sensor is present just because it is
+listed as a candidate here.
+
+4.2 Labels needed for supervised learning
+-----------------------------------------
+For remaining-time prediction:
+- Batch start time.
+- Independently defined batch completion time.
+- The rule or measurement used to declare completion.
+
+For moisture prediction:
+- Moisture percentage measured with a documented method.
+- Measurement timestamp and the related batch/sample.
+- Whether the value is wet-basis or dry-basis moisture.
+- Measurement uncertainty or instrument precision, if known.
+
+For both targets, retain crop type and operating conditions. Collect
+examples across multiple complete batches, not just many readings from
+one batch. Include different weather, crop loads, and operating periods
+where practical.
+
+4.3 Suggested event structure
+-----------------------------
+The exact schema should follow the installed InfluxDB version and current
+Node-RED conventions. A logical sensor record could contain:
+
+  measurement: dryer_telemetry
+  tags: device_id, batch_id, crop_type, sensor_id
+  fields: value, unit, quality_status
+  timestamp: UTC event time
+
+Keep prediction outputs separate from raw sensor readings, for example:
+
+  measurement: dryer_predictions
+  tags: device_id, batch_id, model_version, target
+  fields: estimate, confidence_or_interval, prediction_status
+  timestamp: prediction time
+
+Use a consistent batch ID in telemetry, labels, and predictions. Avoid
+putting highly variable values such as raw timestamps or predictions in
+tags. Confirm the exact field and tag choices with the InfluxDB schema.
+
+======================================================================
+5. PROPOSED SYSTEM DESIGN
+======================================================================
+
+Live data path
+--------------
+1. ESP32 publishes timestamped sensor readings through MQTT.
+2. Node-RED validates basic message shape and forwards raw readings to
+   InfluxDB, preserving the batch ID and sensor units.
+3. Node-RED sends eligible readings or a short recent window to the ML
+   inference service on the local network.
+4. The inference service checks required fields, freshness, and model
+   version, then returns a prediction or a clear unavailable status.
+5. Node-RED writes predictions to a separate InfluxDB measurement.
+6. Grafana displays raw signals and model estimates together, including
+   stale-data or unavailable states.
+
+The inference service may be a small Python HTTP service called by
+Node-RED, or a service that subscribes to MQTT and publishes prediction
+messages. Start with the option that best matches the current deployment
+and team skills. Avoid embedding model code directly into a complex
+Node-RED function unless the model and runtime are genuinely simple.
+
+Offline training path
+---------------------
+1. Export completed batches from InfluxDB.
+2. Join sensor readings to independently collected batch outcomes or
+   moisture measurements.
+3. Validate units, timestamps, batch boundaries, gaps, and sensor faults.
+4. Build features and train the baseline model.
+5. Evaluate on whole held-out batches and compare with a simple baseline.
+6. Save the model, feature definitions, training metadata, and metrics.
+7. Deploy the model artifact to the inference service only after review.
+
+======================================================================
+6. MODEL DEVELOPMENT PLAN
+======================================================================
+
+Step 1: Establish a non-ML baseline
+----------------------------------
+For remaining time, compare against a simple estimate such as the
+historical median duration for the same crop and operating condition, or
+a trend-based estimate. For moisture, compare against the existing
+mass-balance calculation if its required inputs are present.
+
+Step 2: Create time-series features
+-----------------------------------
+Potential features, depending on actual sensors:
+- Current temperature, humidity, and weight.
+- Recent mean, minimum, maximum, and slope over defined windows.
+- Weight-loss rate and change in weight-loss rate.
+- Elapsed time since batch start.
+- Crop type, starting load, and available ambient/solar conditions.
+- Data age, missing fraction, and sensor quality flags.
+
+Feature windows must use only readings available at prediction time.
+Avoid future information leaking into training features or labels.
+
+Step 3: Train a modest tabular model
+------------------------------------
+Start with a transparent baseline and a tree-based model such as Random
+Forest or gradient-boosted trees, depending on the data size and Python
+runtime. These models are usually a more useful first comparison than a
+sequence neural network for a small number of drying batches. Keep model
+selection empirical: compare against the baseline on held-out batches.
+
+Consider GRU/LSTM or other sequence models only if there are enough
+independent batches, useful temporal structure remains unexplained, and
+the simpler models have been evaluated carefully.
+
+Step 4: Validate by batch
+------------------------
+Do not randomly split individual readings from the same batch between
+training and test sets. Use a group split by batch, or a chronological
+holdout of later batches. This better represents performance on future
+runs and reduces overly optimistic metrics.
+
+Where there are enough runs, report results by crop type and relevant
+operating conditions, as well as overall. Keep a final test set untouched
+until model and feature choices are complete.
+
+======================================================================
+7. EVALUATION AND ACCEPTANCE CRITERIA
+======================================================================
+
+Choose numeric thresholds with the project team after reviewing the
+baseline, measurement accuracy, and intended use. Do not select a target
+error only because it looks attractive.
+
+For remaining-time prediction, report:
+- Mean absolute error in minutes or hours.
+- Error by time remaining, crop, and batch conditions.
+- Prediction availability and behavior when inputs are stale/missing.
+- Comparison with the agreed simple baseline.
+
+For moisture prediction, report:
+- Mean absolute error in percentage points.
+- Error by crop, moisture range, and measurement method.
+- Comparison with the mass-balance baseline, if available.
+- Whether the error is small enough for the intended advisory use.
+
+Proposed release gate:
+- Evaluation uses batches excluded from model training.
+- The model improves on the agreed baseline for the intended use, or
+  there is an explicit decision to continue data collection instead.
+- Predictions include model version and status.
+- Missing or invalid input never produces a misleading confident value.
+- The system continues monitoring and logging if the ML service stops.
+- The model has no authority over hard safety limits or actuator control.
+
+======================================================================
+8. GRAFANA EXPERIENCE
+======================================================================
+
+Suggested dashboard panels:
+- Live chamber and ambient signals, with units and sensor status.
+- Batch weight and weight-loss trend, if a load cell is installed.
+- Estimated remaining time or moisture, clearly labeled as a model
+  estimate rather than a direct sensor measurement.
+- Prediction age, model version, and input-quality status.
+- Historical prediction versus measured outcome for completed batches.
+- A visible stale/unavailable indication instead of silently repeating
+  an old prediction.
+
+Show uncertainty or an error range if the model has been evaluated and
+calibrated to support one. Do not present a prediction as a guaranteed
+completion time.
+
+======================================================================
+9. SAFETY, RELIABILITY, AND OPERATIONS
+======================================================================
+
+- Keep existing firmware and hardware safety cutoffs authoritative.
+  The project notes mention 55 C firmware and 65 C hardware limits;
+  verify these values against the actual implementation and wiring before
+  release. This roadmap does not change them.
+- Initial ML operation is advisory and read-only. Do not let an ML output
+  override a cutoff, interlock, or operator stop command.
+- Bound and validate all incoming values. Reject impossible units and
+  stale readings from inference.
+- If inference fails, Node-RED and InfluxDB must continue handling raw
+  monitoring data; show prediction as unavailable.
+- Log model version, input timestamp, batch ID, and prediction status to
+  support diagnosis and later evaluation.
+- Do not automatically retrain or replace a deployed model from live
+  data. Review labels, evaluate a candidate, and deploy a versioned model.
+- Back up raw data and document retention/access practices.
+
+======================================================================
+10. PHASED DELIVERY ROADMAP
+======================================================================
+
+Phase 0 - Confirm scope and inspect the existing system
+------------------------------------------------------
+Activities:
+- Confirm sensors, sampling interval, units, MQTT topics, batch workflow,
+  Node-RED version, InfluxDB version, and Grafana setup.
+- Review ESP32 firmware and Node-RED flows.
+- Select one primary first target: remaining time or moisture estimate.
+- Define how a batch starts and how completion/ground truth is recorded.
+
+Exit criteria:
+- Written telemetry and label definitions.
+- Agreed primary target and initial evaluation metric.
+- Existing safety behavior documented and verified.
+
+Phase 1 - Data collection and quality checks
+---------------------------------------------
+Activities:
+- Preserve timestamped readings and batch IDs in InfluxDB.
+- Record completed-batch outcomes and any moisture measurements.
+- Build a data export and quality-check workflow.
+- Measure missingness, sensor noise, timing gaps, and batch coverage.
+
+Exit criteria:
+- Exportable dataset with documented units and labels.
+- Team understands which targets are trainable with current data.
+
+Phase 2 - Offline baseline and model evaluation
+-----------------------------------------------
+Activities:
+- Build a reproducible training script or notebook.
+- Establish a non-ML baseline.
+- Create time-aware features and a batch-grouped evaluation split.
+- Compare a small set of simple candidate models.
+- Record metrics, known limitations, and feature importance/diagnostics.
+
+Exit criteria:
+- Reviewable metrics on unseen batches.
+- Model accepted for a limited pilot, or data-collection plan updated.
+
+Phase 3 - Inference integration and dashboard
+---------------------------------------------
+Activities:
+- Package model inference as a small service.
+- Add a Node-RED path to call the service and handle errors/timeouts.
+- Write versioned predictions to a separate InfluxDB measurement.
+- Add Grafana panels for prediction, status, and historical comparison.
+- Test service restart, MQTT loss, invalid values, and missing fields.
+
+Exit criteria:
+- End-to-end live prediction in advisory mode.
+- Raw monitoring path remains functional when inference is offline.
+
+Phase 4 - Field pilot and improvement
+------------------------------------
+Activities:
+- Run the model alongside existing monitoring without controlling
+  actuators.
+- Compare predictions with actual batch outcomes.
+- Track performance across crops and environmental conditions.
+- Gather operator feedback and revise thresholds/presentation.
+
+Exit criteria:
+- Pilot report and explicit decision to deploy, retrain, or collect more
+  representative data.
+
+Phase 5 - Optional expansion
+----------------------------
+Possible later work:
+- Moisture soft sensor using measured moisture labels.
+- Drying-endpoint/change-point detection.
+- Sensor/fan/heater anomaly detection.
+- Crop-specific model evaluation or a shared model with crop features.
+- Edge inference on ESP32 only if offline inference is a requirement and
+  the model fits the board's memory and runtime constraints.
+- Automated control only after separate safety engineering, simulation,
+  staged testing, and human approval. It is not part of this roadmap's
+  initial deployment.
+
+Timeline note: calendar duration depends primarily on how many complete,
+representative, labeled batches are available. Data collection may be the
+longest phase; a model should not be rushed to deployment to meet a date.
+
+======================================================================
+11. TEAM RESPONSIBILITIES
+======================================================================
+
+Hardware/firmware owner
+- Confirm installed sensors, calibration, units, timestamps, batch ID,
+  sampling behavior, and safety cutoffs.
+- Verify that telemetry remains available during network interruptions.
+
+Node-RED/IoT owner
+- Document MQTT topic and message contracts.
+- Route and validate telemetry; add inference request/response handling.
+- Preserve the raw-data path if the model service is unavailable.
+
+Data/ML owner
+- Define labels and dataset checks with the domain team.
+- Build reproducible training, evaluation, and model-version artifacts.
+- Report limitations and compare against baselines.
+
+Dashboard/operations owner
+- Store prediction output separately from raw readings.
+- Present estimates, status, and freshness clearly in Grafana.
+- Review pilot feedback and document operating procedures.
+
+Project lead/domain reviewer
+- Approve target definition, evaluation criteria, and pilot scope.
+- Confirm the drying completion rule and safety requirements.
+
+======================================================================
+12. RISKS AND MITIGATIONS
+======================================================================
+
+Risk: Not enough completed batches.
+Mitigation: Begin structured logging now; treat early model results as
+exploratory and collect more runs before making performance claims.
+
+Risk: No measured moisture labels.
+Mitigation: Start with remaining-time prediction if completion times are
+reliable, or establish a moisture measurement protocol before training a
+moisture estimator.
+
+Risk: Readings from one run leak into both training and test sets.
+Mitigation: Split by batch, not by individual row.
+
+Risk: Sensor drift, bad calibration, or changing units.
+Mitigation: Document calibration and units; retain quality flags; inspect
+sensor distributions and batch plots before training.
+
+Risk: Crop and weather variation makes a single model unreliable.
+Mitigation: Collect representative runs and report per-crop/condition
+metrics; restrict the initial model's stated scope where needed.
+
+Risk: Stale or missing input creates a misleading prediction.
+Mitigation: Validate input freshness and required fields; return an
+explicit unavailable state.
+
+Risk: A model prediction is mistaken for a safety measurement.
+Mitigation: Label it as an estimate, keep it read-only, and preserve
+independent firmware/hardware cutoffs and interlocks.
+
+======================================================================
+13. INPUTS NEEDED TO START IMPLEMENTATION
+======================================================================
+
+Please provide or add to the project workspace:
+- ESP32 firmware/source code.
+- Node-RED flow export.
+- Example MQTT payloads and topic names.
+- InfluxDB measurements/fields/tags or a small CSV export.
+- Sensor list, units, sampling interval, and calibration details.
+- A few completed batch records and the team's completion rule.
+- Moisture readings and measurement method, if moisture prediction is
+  the selected first target.
+- Any current Grafana dashboard export, if available.
+
+The first implementation decision after reviewing these items is whether
+the available labels support remaining-time prediction, moisture
+prediction, both, or neither yet. Model training should begin only after
+that decision and a basic data-quality review.
+
+======================================================================
+END OF ROADMAP
+======================================================================
