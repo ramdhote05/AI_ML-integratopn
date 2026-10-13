@@ -1,0 +1,16 @@
+Smart Dryer Dataset Summary
+
+Source files: four Grafana CSV exports supplied by the user.
+Common aligned time window: 2026-10-10 00:31:40 to 2026-10-10 01:29:50
+Common timeline rows (10-second intervals): 350
+
+Source row counts:
+- temperature: 672 rows, 2026-10-09 23:38:10 to 2026-10-10 01:29:53
+- weight_kg: 360 rows, 2026-10-10 00:31:40 to 2026-10-10 01:31:29
+- weight_grams: 679 rows, 2026-10-09 23:38:10 to 2026-10-10 01:31:07
+- humidity: 676 rows, 2026-10-09 23:38:10 to 2026-10-10 01:30:40
+
+Important interpretation notes:
+- The combined dataset aligns readings to a common 10-second timeline using time interpolation only within each sensor's observed time range.
+- Weight in grams and weight in kilograms were exported separately and may not match perfectly at every timestamp due to different capture times/rounding.
+- This dataset is suitable for exploratory plots; for a research paper, document the alignment/interpolation method and retain the original raw CSV files.
